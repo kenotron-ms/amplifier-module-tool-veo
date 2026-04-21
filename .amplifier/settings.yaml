@@ -1,0 +1,5 @@
+tools:
+  sources:
+    - id: tool-veo
+      type: file
+      path: ..

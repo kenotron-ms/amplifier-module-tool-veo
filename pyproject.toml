@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "amplifier-module-tool-veo"
+version = "0.1.0"
+description = "Veo video generation tool for Amplifier - powered by Google Veo 3.1 via the Gemini API"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = ["google-genai>=1.0.0"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+    "pyright>=1.1.0",
+]
+
+# Amplifier module discovery hook
+[project.entry-points."amplifier.modules"]
+tool-veo = "amplifier_module_tool_veo:mount"
+
+[tool.hatch.build.targets.wheel]
+packages = ["amplifier_module_tool_veo"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["integration: tests that call external APIs (requires GOOGLE_API_KEY)"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"

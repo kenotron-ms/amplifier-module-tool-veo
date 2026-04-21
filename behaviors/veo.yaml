@@ -1,0 +1,16 @@
+bundle:
+  name: veo-behavior
+  version: 0.1.0
+  description: Reusable behavior that registers the Veo video generation tool, expert agent, and awareness context
+
+tools:
+  - module: tool-veo
+    source: git+https://github.com/kenotron-ms/amplifier-module-tool-veo@main
+
+agents:
+  include:
+    - veo:agents/veo-expert
+
+context:
+  include:
+    - veo:context/veo-awareness.md
