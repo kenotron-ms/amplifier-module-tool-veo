@@ -23,26 +23,8 @@ To make it permanent, add the line above to your `~/.zshrc` (or `~/.bashrc`).
 
 ## Installation
 
-### Option A — add to an existing bundle
-
-Paste this `includes` block into your bundle's `.amplifier/bundle.md` (or root `bundle.md`):
-
-```yaml
-includes:
-  - bundle: veo
-    source: git+https://github.com/kenotron-ms/amplifier-module-tool-veo@main
-```
-
-### Option B — use it as a standalone session
-
 ```bash
-amp --bundle git+https://github.com/kenotron-ms/amplifier-module-tool-veo@main
-```
-
-### Option C — install the Python package directly
-
-```bash
-pip install git+https://github.com/kenotron-ms/amplifier-module-tool-veo@main
+amplifier bundle add git+https://github.com/kenotron-ms/amplifier-module-tool-veo@main --app
 ```
 
 ---
