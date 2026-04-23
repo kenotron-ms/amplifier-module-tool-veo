@@ -1,4 +1,5 @@
 """Veo video generation tool implementation."""
+
 from __future__ import annotations
 
 import asyncio
@@ -71,6 +72,12 @@ class VeoTool:
             or _DEFAULT_MODEL
         )
         self.poll_interval: int = int(config.get("poll_interval_seconds", 10))
+        # Vertex AI config (required for interpolation / last_frame)
+        self.vertexai: bool = bool(config.get("vertexai", False))
+        self.project: str | None = config.get("project") or os.getenv("GOOGLE_CLOUD_PROJECT")
+        self.location: str = (
+            config.get("location") or os.getenv("GOOGLE_CLOUD_LOCATION") or "us-central1"
+        )
 
     # ------------------------------------------------------------------
     # Tool protocol
@@ -157,7 +164,9 @@ class VeoTool:
                     "description": (
                         "Path to the ending frame image for interpolation. "
                         "Used alongside image_path in 'image_to_video' to specify both "
-                        "the start and end frames; Veo generates the in-between motion."
+                        "the start and end frames; Veo generates the in-between motion. "
+                        "Duration is automatically set to 8 seconds when this is provided "
+                        "(the minimum required for interpolation)."
                     ),
                 },
                 # --- Reference images ---
@@ -224,7 +233,8 @@ class VeoTool:
                         "Veo 3.x text-to-video & extension: only 'allow_all' is accepted. "
                         "Veo 3.x image-to-video, interpolation, reference images: only 'allow_adult'. "
                         "Veo 2 text-to-video: 'allow_all', 'allow_adult', or 'dont_allow'. "
-                        "EU/UK/CH/MENA regions are restricted — see API docs."
+                        "EU/UK/CH/MENA regions are restricted — see API docs. "
+                        "Defaults are set automatically per operation."
                     ),
                 },
                 "number_of_videos": {
@@ -261,14 +271,6 @@ class VeoTool:
     # ------------------------------------------------------------------
 
     async def execute(self, input_data: dict[str, Any]) -> ToolResult:
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            return ToolResult(
-                success=False,
-                output="GOOGLE_API_KEY environment variable is not set.",
-                error={"message": "Missing API key: set GOOGLE_API_KEY"},
-            )
-
         operation: str = input_data.get("operation", "")
         if not operation:
             return ToolResult(
@@ -285,7 +287,7 @@ class VeoTool:
             from google import genai
             from google.genai import types as genai_types
 
-            client = genai.Client(api_key=api_key)
+            client = self._build_client(genai)
 
             if operation == "generate":
                 return await self._generate(
@@ -319,6 +321,36 @@ class VeoTool:
             )
 
     # ------------------------------------------------------------------
+    # Client construction
+    # ------------------------------------------------------------------
+
+    def _build_client(self, genai: Any) -> Any:
+        """Build a Gemini API client (Developer API or Vertex AI)."""
+        use_vertexai = self.vertexai or bool(self.project)
+
+        if use_vertexai:
+            if not self.project:
+                raise ValueError(
+                    "Vertex AI mode requires a Google Cloud project. "
+                    "Set the GOOGLE_CLOUD_PROJECT environment variable or "
+                    "configure 'project' in the tool config."
+                )
+            return genai.Client(
+                vertexai=True,
+                project=self.project,
+                location=self.location,
+            )
+
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "GOOGLE_API_KEY environment variable is not set. "
+                "Set GOOGLE_API_KEY for the Gemini Developer API, or set "
+                "GOOGLE_CLOUD_PROJECT (+ Application Default Credentials) for Vertex AI."
+            )
+        return genai.Client(api_key=api_key)
+
+    # ------------------------------------------------------------------
     # Operation implementations
     # ------------------------------------------------------------------
 
@@ -340,7 +372,7 @@ class VeoTool:
                 error={"message": "Missing required field: prompt"},
             )
 
-        config = self._build_config(types, input_data)
+        config = self._build_config(types, input_data, operation="generate")
 
         await self.coordinator.hooks.emit(
             "tool.veo.generate",
@@ -403,8 +435,11 @@ class VeoTool:
                     output=f"Last frame image not found: {last_frame_path_str}",
                     error={"message": f"File not found: {last_frame_path_str}"},
                 )
+            # Interpolation requires duration=8; auto-upgrade if caller didn't specify or went lower.
+            if not input_data.get("duration_seconds") or int(input_data["duration_seconds"]) < 8:
+                input_data = {**input_data, "duration_seconds": 8}
 
-        config = self._build_config(types, input_data, extra=extra)
+        config = self._build_config(types, input_data, operation="image_to_video", extra=extra)
 
         await self.coordinator.hooks.emit(
             "tool.veo.image_to_video",
@@ -479,7 +514,12 @@ class VeoTool:
                 error={"message": str(exc)},
             )
 
-        config = self._build_config(types, input_data, extra={"reference_images": reference_images})
+        config = self._build_config(
+            types,
+            input_data,
+            operation="reference_images",
+            extra={"reference_images": reference_images},
+        )
 
         await self.coordinator.hooks.emit(
             "tool.veo.reference_images",
@@ -526,7 +566,7 @@ class VeoTool:
         # Reconstruct the Video object from the Files API URI
         video = types.Video(uri=video_uri)
 
-        config = self._build_config(types, input_data)
+        config = self._build_config(types, input_data, operation="extend")
 
         await self.coordinator.hooks.emit(
             "tool.veo.extend",
@@ -551,23 +591,38 @@ class VeoTool:
         self,
         types: Any,
         input_data: dict[str, Any],
+        operation: str = "generate",
         extra: dict[str, Any] | None = None,
     ) -> Any | None:
-        """Build a GenerateVideosConfig from input_data plus any extra kwargs."""
+        """Build a GenerateVideosConfig from input_data plus any extra kwargs.
+
+        Automatically applies the correct person_generation default per operation:
+        - image_to_video / reference_images: 'allow_adult' (Veo 3.x requirement)
+        - generate / extend: 'allow_all' (Veo 3.x default for text-to-video)
+        """
         kwargs: dict[str, Any] = {}
 
         if aspect_ratio := input_data.get("aspect_ratio"):
             kwargs["aspect_ratio"] = aspect_ratio
         if duration := input_data.get("duration_seconds"):
-            kwargs["duration_seconds"] = duration
+            kwargs["duration_seconds"] = int(duration)  # API expects integer, not string
         if resolution := input_data.get("resolution"):
             kwargs["resolution"] = resolution
-        if person_gen := input_data.get("person_generation"):
-            kwargs["person_generation"] = person_gen
         if num_videos := input_data.get("number_of_videos"):
             kwargs["number_of_videos"] = int(num_videos)
         if seed := input_data.get("seed"):
             kwargs["seed"] = int(seed)
+
+        # person_generation: use explicit value if provided; otherwise apply sensible default.
+        # Veo 3.x image-based operations REQUIRE allow_adult (not allow_all).
+        # Without the correct value, the API returns "Your use case is currently not supported."
+        person_gen = input_data.get("person_generation")
+        if person_gen:
+            kwargs["person_generation"] = person_gen
+        elif operation in ("image_to_video", "reference_images"):
+            # Default for image-based Veo 3.x operations
+            kwargs["person_generation"] = "allow_adult"
+        # For 'generate' and 'extend', omit person_generation to let the API use its default.
 
         if extra:
             kwargs.update(extra)
